@@ -28,10 +28,13 @@ version_info=`expr $VMAJ + $VMIN`":$VMIC:$VMIN"
 AC_SUBST(version_info)
 
 pluginsdir="${libdir}/lightmediascanner/plugins"
+lmsdir="${bindir}"
 
 AC_SUBST(pluginsdir)
 AS_AC_EXPAND(PLUGINSDIR, $pluginsdir)
 AC_DEFINE_UNQUOTED(PLUGINSDIR, ["$PLUGINSDIR"], [Where plugins are installed.])
+
+AC_SUBST(lmsdir)
 
 AC_CHECK_FUNCS(realpath)
 AM_ICONV

@@ -4,17 +4,17 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/lib \
 	@SQLITE3_CFLAGS@
 
-noinst_PROGRAMS = \
-	test \
-	list-parsers
+lms_PROGRAMS = \
+	lms-test \
+	lms-list-parsers
 
 
-test_SOURCES = test.c
-test_LDADD = $(top_builddir)/src/lib/liblightmediascanner.la @SQLITE3_LIBS@
-test_DEPENDENCIES = $(top_builddir)/src/lib/liblightmediascanner.la
+lms_test_SOURCES = test.c
+lms_test_LDADD = $(top_builddir)/src/lib/liblightmediascanner.la @SQLITE3_LIBS@
+lms_test_DEPENDENCIES = $(top_builddir)/src/lib/liblightmediascanner.la
 
 
-list_parsers_SOURCES = list-parsers.c
-list_parsers_LDADD = $(top_builddir)/src/lib/liblightmediascanner.la \
+lms_list_parsers_SOURCES = list-parsers.c
+lms_list_parsers_LDADD = $(top_builddir)/src/lib/liblightmediascanner.la \
 	@SQLITE3_LIBS@
-list_parsers_DEPENDENCIES = $(top_builddir)/src/lib/liblightmediascanner.la
+lms_list_parsers_DEPENDENCIES = $(top_builddir)/src/lib/liblightmediascanner.la
