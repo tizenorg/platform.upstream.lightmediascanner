@@ -44,7 +44,7 @@ LMS test programs
 
 %autogen
 
-make %{?_smp_mflags}
+make %{?jobs:-j%jobs}
 
 %install
 rm -rf %{buildroot}
@@ -65,7 +65,6 @@ libtool --mode=install install -m 0755 %{testbindir}/src/bin/list-parsers %{buil
 %defattr(-, root, root)
 %doc AUTHORS README
 %license COPYING
-%{_bindir}/lightmediascanner*
 %{_libdir}/*.so.*
 %{_libdir}/lightmediascanner/plugins/*
 %{_prefix}/share/dbus-1/services/*.service
@@ -78,5 +77,4 @@ libtool --mode=install install -m 0755 %{testbindir}/src/bin/list-parsers %{buil
 
 %files test
 %defattr(-, root, root)
-%{_bindir}/lms-test
-%{_bindir}/lms-list-parsers
+%{_bindir}/*
