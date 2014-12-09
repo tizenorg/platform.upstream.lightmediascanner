@@ -30,6 +30,9 @@
 #include <sqlite3.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <time.h>
+
 
 static int color = 0;
 static const char short_options[] = "s:S:p:P::c:i:t:m:v::h";
@@ -504,6 +507,9 @@ main(int argc, char *argv[])
     int r;
     lms_t *lms;
     char *term;
+
+    long int seconds = time((time_t*)NULL);
+    fprintf(stderr, "start to parse time:  %ld\n", seconds);
 
     term = getenv("TERM");
     if (term &&

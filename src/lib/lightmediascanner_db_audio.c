@@ -34,6 +34,7 @@ struct lms_db_audio {
     sqlite3_stmt *get_artist;
     sqlite3_stmt *get_album;
     sqlite3_stmt *get_genre;
+    sqlite3_stmt *update_audio; 
     unsigned int _references;
     unsigned int _is_started:1;
 };
@@ -422,8 +423,44 @@ lms_db_audio_start(lms_db_audio_t *lda)
     if (!lda->get_genre)
         return -8;
 
+    lda->update_audio = lms_db_compile_stmt(lda->db, 
+         "UPDATE audios SET bitrate = ?, length = ?  WHERE id = ?");
+    if (!lda->update_audio)
+        return -9;
+     
     lda->_is_started = 1;
     return 0;
+}
+
+static int
+_db_update_audio(sqlite3_stmt *stmt, unsigned int bitrate, unsigned int length, int64_t id)
+{
+    int r;
+    int ret = lms_db_bind_int(stmt, 1, bitrate);
+    if (ret != 0)
+        goto done;  
+
+    ret = lms_db_bind_int(stmt, 2, length);
+    if(ret != 0)
+        goto done;
+
+    ret = lms_db_bind_int64(stmt, 3, id);
+    if(ret != 0)
+        goto done;
+
+    r = sqlite3_step(stmt);
+    if (r != SQLITE_DONE) {
+        fprintf(stderr, "ERROR: could not update file info: %s\n", sqlite3_errmsg(sqlite3_db_handle(stmt)));
+        ret = -5;
+        goto done;
+    }       
+    ret = 0;
+
+done:
+lms_db_reset_stmt(stmt); 
+
+return ret;
+
 }
 
 /**
@@ -474,6 +511,9 @@ lms_db_audio_free(lms_db_audio_t *lda)
 
     if (lda->get_genre)
         lms_db_finalize_stmt(lda->get_genre, "get_genre");
+
+    if (lda->update_audio)
+        lms_db_finalize_stmt(lda->update_audio, "update_audio");
 
     r = lms_db_cache_del(&_cache, lda->db, lda);
     free(lda);
@@ -763,4 +803,9 @@ lms_db_audio_add(lms_db_audio_t *lda, struct lms_audio_info *info)
                             (ret_album == 0) ? &album_id : NULL,
                             (ret_artist == 0) ? &artist_id : NULL,
                             (ret_genre == 0) ? &genre_id : NULL);
+}
+
+int lms_db_audio_update(lms_db_audio_t *lda, struct lms_audio_update* t)
+{
+    return _db_update_audio(lda->update_audio, t->bitrate, t->length, t->id);    
 }

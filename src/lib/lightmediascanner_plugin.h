@@ -154,17 +154,45 @@ extern "C" {
         unsigned char parsed : 1; /**< if file was already successfully parsed before */
     };
 
+
+    typedef int (*lms_plugin_callback_fn_t)(void);
+
     struct lms_context {
         sqlite3 *db; /**< database instance */
         lms_charset_conv_t *cs_conv; /**< charset conversion tool */
+        void* cache;
+        lms_plugin_callback_fn_t callback;
+    };
+
+    #define THREADS 2
+
+    struct thread_info {
+        int scanned;  //parsed count
+        int finished; //thread finished
+        int start;    //start point to parse
+    };
+
+    enum update_status {
+        STATUS_IDLE = 0,
+        STATUS_PARSING,
+    };
+
+    struct update_info {
+        unsigned int total;
+        struct thread_info threads[THREADS];
+        int finished;
+        enum update_status status;
     };
 
     typedef void *(*lms_plugin_match_fn_t)(lms_plugin_t *p, const char *path, int len, int base);
     typedef int (*lms_plugin_parse_fn_t)(lms_plugin_t *p, struct lms_context *ctxt, const struct lms_file_info *finfo, void *match);
+    typedef int (*lms_plugin_parse2_fn_t)(lms_plugin_t *p, struct lms_context *ctxt, int data); 
     typedef int (*lms_plugin_close_fn_t)(lms_plugin_t *p);
     typedef int (*lms_plugin_setup_fn_t)(lms_plugin_t *p, struct lms_context *ctxt);
     typedef int (*lms_plugin_start_fn_t)(lms_plugin_t *p, struct lms_context *ctxt);
     typedef int (*lms_plugin_finish_fn_t)(lms_plugin_t *p, struct lms_context *ctxt);
+    typedef int (*lms_plugin_update_fn_t)(lms_plugin_t *p, struct lms_context *ctxt, int index);
+    
 
     struct lms_plugin {
         const char *name; /**< plugin name */
@@ -174,6 +202,8 @@ extern "C" {
         lms_plugin_setup_fn_t setup; /**< setup (1st phase init) */
         lms_plugin_start_fn_t start; /**< start (2nd phase init) */
         lms_plugin_finish_fn_t finish; /**< finish plugin */
+        lms_plugin_parse2_fn_t parse2; /**< 2nd parse, just for id3 now*/
+        lms_plugin_update_fn_t update;/**< update bitrate & length into database*/
         int order;
     };
 

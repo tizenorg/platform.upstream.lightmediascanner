@@ -47,6 +47,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <semaphore.h>
+#include <errno.h>
+#include <limits.h>
 
 #define DECL_STR(cname, str)                                            \
     static const struct lms_string_size cname = LMS_STATIC_STRING_SIZE(str)
@@ -115,6 +118,16 @@ struct mpeg_header {
     bool cbr;
 };
 
+struct hdr_info {
+    int64_t id;
+    struct mpeg_header  hdr;
+    off_t offset;
+    size_t size;
+    char path[PATH_MAX];
+    int parsed;
+    int recorded;
+};
+
 static const struct lms_string_size *_codecs[] = {
     /* mp3 */
     [0] = &_codec_mpeg1layer1,
@@ -152,6 +165,10 @@ static int _sample_rates[16] = {
 
     7350, /* reserved, zeroed */
 };
+
+struct hdr_info *head = 0;
+struct update_info *update = 0;
+lms_plugin_callback_fn_t cond_wait = NULL;
 
 static unsigned int
 _bitrate_table[_MPEG_AUDIO_VERSION_COUNT][_MPEG_AUDIO_LAYER_COUNT][16] = {
@@ -316,6 +333,8 @@ _fill_mp3_header(struct mpeg_header *hdr, const uint8_t b[4])
     return 0;
 }
 
+static int _record_hdr_info(struct mpeg_header* hdr, int64_t id, const char* path, off_t off, size_t size);
+
 static inline int
 _fill_aac_header(struct mpeg_header *hdr, const uint8_t b[4])
 {
@@ -383,7 +402,7 @@ _fill_mpeg_header(struct mpeg_header *hdr, const uint8_t b[4])
 
 static int
 _estimate_mp3_bitrate_from_frames(int fd, off_t mpeg_offset,
-                                  struct mpeg_header *orig_hdr)
+                                  struct mpeg_header *orig_hdr, unsigned int frames_estimate)
 {
     struct mpeg_header hdr = *orig_hdr;
     off_t offset = mpeg_offset;
@@ -400,7 +419,7 @@ _estimate_mp3_bitrate_from_frames(int fd, off_t mpeg_offset,
     sampling_rate = _sample_rates[hdr.sampling_rate_idx];
     assert(sampling_rate != 0);
 
-    for (i = 0; i < N_FRAMES_BITRATE_ESTIMATE;) {
+    for (i = 0; i < frames_estimate;) {
         unsigned int bitrate, padding_size;
         unsigned int framesize;
         uint8_t buf[4];
@@ -425,6 +444,10 @@ _estimate_mp3_bitrate_from_frames(int fd, off_t mpeg_offset,
         offset += framesize;
 
         lseek(fd, offset, SEEK_SET);
+
+		if (update != NULL)
+        	cond_wait();
+
         r = read(fd, buf, sizeof(buf));
 
         if (r < 0) {
@@ -445,7 +468,7 @@ _estimate_mp3_bitrate_from_frames(int fd, off_t mpeg_offset,
         }
     }
 
-    orig_hdr->bitrate = sum / i * 1000;
+    orig_hdr->bitrate = sum / i;
 
     return 0;
 }
@@ -511,7 +534,7 @@ proceed:
 
 static int
 _parse_mpeg_header(int fd, off_t off, struct lms_audio_info *audio_info,
-                   size_t size)
+                   size_t size, struct mpeg_header *parsed_hdr)
 {
     uint8_t buffer[32];
     const uint8_t *p, *p_end;
@@ -565,12 +588,15 @@ found:
             hdr.bitrate =
                 _bitrate_table[hdr.version][hdr.layer][hdr.bitrate_idx] * 1000;
         else if (!hdr.bitrate) {
-            r = _estimate_mp3_bitrate_from_frames(fd, off, &hdr);
+            if (update != NULL)
+            	r = 0;
+            else
+				r = _estimate_mp3_bitrate_from_frames(fd, off, &hdr, N_FRAMES_BITRATE_ESTIMATE);
             if (r < 0)
-                return r;
+            	return r;
         }
 
-        if (!hdr.length)
+        if (!hdr.length && hdr.bitrate)
             hdr.length =  (8 * (size - off)) / (1000 * hdr.bitrate);
     }
 
@@ -582,8 +608,89 @@ found:
     audio_info->channels = hdr.channels;
     audio_info->bitrate = hdr.bitrate;
     audio_info->length = hdr.length;
-
+    memcpy(parsed_hdr, &hdr, sizeof(struct mpeg_header));
     return 0;
+}
+
+static int 
+_record_hdr_info(struct mpeg_header* hdr, int64_t id, const char* path, off_t off, size_t size) {
+
+    struct hdr_info* info;
+    if (update == NULL)
+    	return -1;
+    info = (struct hdr_info*)(head + update->total);
+    strncpy(info->path, path, PATH_MAX);
+    info->id = id;
+    info->offset = off;
+    info->size = size;
+    info->recorded = 1;
+    memcpy(&info->hdr, hdr, sizeof(struct mpeg_header));
+    update->total++;
+    return 0;
+}
+
+static inline const char* 
+_getpath(struct hdr_info* info) {
+     return info->path;
+}
+
+static int 
+_parse_bitrate(struct hdr_info *info) {
+
+    int fd, r;
+    
+    if (info->recorded == 0)
+        return -1;
+      
+    if (info->parsed == 1)
+        return -2;
+
+    fd = open(_getpath(info), O_RDONLY);
+    if (fd < 0) {
+        //omit this error, should never happen
+        fprintf(stderr, "open file failed %s \n", info->path);
+        info->parsed = 1;
+        return 0;
+    }
+
+    r = _estimate_mp3_bitrate_from_frames(fd, info->offset, &info->hdr, N_FRAMES_BITRATE_ESTIMATE);
+
+    if (r < 0) {
+        fprintf(stderr, "_estimate_failed %s \n", info->path);  
+        goto done;
+    }
+
+    if (info->hdr.bitrate ==0) {
+        fprintf(stderr, "_estimate_failed1 %s\n", info->path);
+    }      
+
+    if (!info->hdr.length && info->hdr.bitrate)
+        info->hdr.length =  (8 * (info->size - info->offset)) / (1000 * info->hdr.bitrate);
+
+    done:
+    info->parsed = 1;
+    posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+    close(fd);
+    return 0;
+}
+
+static int
+_audio_update (struct plugin* plugin, struct hdr_info* info)
+{
+    struct lms_audio_update t;
+    if (info->parsed == 0)
+        return -1; 
+    t.bitrate = info->hdr.bitrate;
+    t.length = info->hdr.length;
+    t.id = info->id;
+    lms_db_audio_update(plugin->audio_db, &t);
+    return 0;
+}
+
+static int 
+_update(struct plugin* plugin, struct lms_context *ctxt, int index)
+{
+    return _audio_update(plugin, head + index);
 }
 
 /* Returns the offset in fd to the position after the ID3 tag, iff it occurs
@@ -1137,6 +1244,7 @@ _parse(struct plugin *plugin, struct lms_context *ctxt, const struct lms_file_in
         .cur_artist_priority = -1,
     };
     struct lms_audio_info audio_info = { };
+    struct mpeg_header hdr = { };
     int r, fd;
     long id3v2_offset;
     off_t sync_offset = 0;
@@ -1225,10 +1333,12 @@ _parse(struct plugin *plugin, struct lms_context *ctxt, const struct lms_file_in
     audio_info.genre = info.genre;
     audio_info.trackno = info.trackno;
 
-    _parse_mpeg_header(fd, sync_offset, &audio_info, finfo->size);
+    _parse_mpeg_header(fd, sync_offset, &audio_info, finfo->size, &hdr);
 
     audio_info.container = _container_mp3;
     r = lms_db_audio_add(plugin->audio_db, &audio_info);
+    if (r == 0)
+       _record_hdr_info(&hdr, finfo->id, finfo->path, sync_offset, finfo->size); 
 
   done:
     posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
@@ -1270,6 +1380,12 @@ _setup(struct plugin *plugin, struct lms_context *ctxt)
         lms_charset_conv_add(plugin->cs_convs[i], id3_encodings[i]);
     }
 
+    if (ctxt->cache != NULL)
+    {
+    	head = (struct hdr_info*) ((char*)ctxt->cache + sizeof(struct update_info)); //+ cache->commited* sizeof(hdr_info);
+    	update = (struct update_info*)ctxt->cache;
+    	cond_wait = ctxt->callback;
+    }
     return 0;
 }
 
@@ -1277,6 +1393,12 @@ static int
 _start(struct plugin *plugin, struct lms_context *ctxt)
 {
     return lms_db_audio_start(plugin->audio_db);
+}
+
+static int
+_parse2(struct plugin *plugin, struct lms_context *ctxt, int index)
+{
+    return _parse_bitrate(head + index);   
 }
 
 static int
@@ -1315,6 +1437,8 @@ lms_plugin_open(void)
     plugin->plugin.setup = (lms_plugin_setup_fn_t)_setup;
     plugin->plugin.start = (lms_plugin_start_fn_t)_start;
     plugin->plugin.finish = (lms_plugin_finish_fn_t)_finish;
+    plugin->plugin.parse2 = (lms_plugin_parse2_fn_t)_parse2;
+    plugin->plugin.update = (lms_plugin_update_fn_t)_update;
     plugin->plugin.order = 0;
 
     return (struct lms_plugin *)plugin;

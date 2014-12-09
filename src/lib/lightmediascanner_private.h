@@ -81,6 +81,8 @@ struct lms {
     lms_charset_conv_t *cs_conv;
     char *db_path;
     int slave_timeout;
+    int slave_timeout2;
+    void* cache;
     struct {
         lms_progress_callback_t cb;
         void *data;
