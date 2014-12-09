@@ -31,8 +31,9 @@
 #include "lightmediascanner_private.h"
 #include "lightmediascanner_plugin.h"
 
-#define DEFAULT_SLAVE_TIMEOUT 1000
+#define DEFAULT_SLAVE_TIMEOUT 3000
 #define DEFAULT_COMMIT_INTERVAL 100
+#define DEFAULT_SLAVE_TIMEOUT_SECOND_PARSE 15000
 
 static int
 _parser_load(struct parser *p, const char *so_path)
@@ -133,6 +134,8 @@ lms_new(const char *db_path)
 
     lms->commit_interval = DEFAULT_COMMIT_INTERVAL;
     lms->slave_timeout = DEFAULT_SLAVE_TIMEOUT;
+    lms->slave_timeout2 = DEFAULT_SLAVE_TIMEOUT_SECOND_PARSE;
+    lms->cache = 0;
     lms->db_path = strdup(db_path);
     if (!lms->db_path) {
         perror("strdup");

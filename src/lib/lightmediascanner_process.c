@@ -31,9 +31,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <gio/gio.h>
+#include <glib-unix.h>
+#include <sys/ipc.h>
+#include <sys/types.h>
+#include <errno.h>
+#include <sys/time.h>
+
 #include "lightmediascanner.h"
 #include "lightmediascanner_private.h"
 #include "lightmediascanner_db_private.h"
+
+#define SHM_MAXSIZE (25*1024*1024)
+#define UPDATE_BATCH_SIZE (4000)
 
 struct db {
     sqlite3 *handle;
@@ -45,6 +55,11 @@ struct db {
     sqlite3_stmt *delete_file_info;
     sqlite3_stmt *set_file_dtime;
 };
+
+static int _strcat(int base, char *path, const char *name);
+static int _enable_parse(void);
+static int _disable_parse(void);
+static int _can_parse(void);
 
 /***********************************************************************
  * Master-Slave communication.
@@ -291,6 +306,8 @@ _ctxt_init(struct lms_context *ctxt, const lms_t *lms, sqlite3 *db)
 {
     ctxt->cs_conv = lms->cs_conv;
     ctxt->db = db;
+    ctxt->cache = lms->cache;
+    ctxt->callback = _can_parse;
 }
 
 int
@@ -387,6 +404,271 @@ lms_parsers_check_using(lms_t *lms, void **parser_match, struct lms_file_info *f
     return used;
 }
 
+int current_status = 0;
+GMutex data_mutex;
+GCond  data_cond;
+
+int start_status = 0;
+GMutex start_mutex;
+GCond  start_cond;
+
+static lms_plugin_t* 
+_parsers_get_id3_plugin(lms_t *lms)
+{
+    int i;
+    for (i = 0; i < lms->n_parsers; i++) {
+        lms_plugin_t* plugin = lms->parsers[i].plugin;
+        if (strncmp(plugin->name, "id3", 3) == 0) {
+            return plugin;
+        }
+    }
+    return NULL;
+}
+
+static int
+_enable_parse(void) 
+{
+    g_mutex_lock (&data_mutex);
+    if (current_status == 0) {
+        current_status = 1;
+        g_cond_signal (&data_cond);
+    }
+    g_mutex_unlock (&data_mutex);
+    return 0;
+}
+
+static int
+_disable_parse(void)
+{
+    g_mutex_lock (&data_mutex);
+    current_status = 0;
+    g_mutex_unlock (&data_mutex);
+    return 0;
+}
+
+static int 
+_can_parse(void) {
+    g_mutex_lock (&data_mutex);
+    while (current_status == 0)
+        g_cond_wait (&data_cond, &data_mutex);
+    g_mutex_unlock (&data_mutex);
+    return 0;
+}
+
+static int
+_wait_start(void) {
+    g_mutex_lock(&start_mutex);
+    while (start_status == 0)
+        g_cond_wait (&start_cond, &start_mutex);
+    start_status = 0;
+    g_mutex_unlock (&start_mutex);
+    return 0;
+}
+
+static int 
+_notify_start(void) {
+    g_mutex_lock (&start_mutex);
+    start_status = 1;
+    g_cond_signal (&start_cond);
+    g_mutex_unlock (&start_mutex);
+    return 0;
+}
+
+static inline int 
+_find_start(int total, int scanned) {
+    return scanned + ((total - scanned) / 2) - 1;
+}
+
+
+static gpointer 
+_parse_extra_thread(gpointer data) {
+
+    struct update_info* update;
+    int r;
+    unsigned int i = 0;
+    lms_t *lms = data;
+    lms_plugin_t* plugin = _parsers_get_id3_plugin(lms);
+
+    update = (struct update_info*)lms->cache;
+
+    _wait_start();
+
+    while (1)
+    {
+        if (update->finished && update->total == i)
+            break;
+
+        r = plugin->parse2(plugin, NULL, i);
+
+        if (r == 0) {
+            i++; 
+            update->threads[0].scanned++;
+        }
+        else if (r == -1)
+            usleep(1000);
+        else if (r == -2)
+            break;
+    }
+
+    return lms;
+}
+
+static gpointer 
+_parse_extra_thread2(gpointer data) {
+
+    struct update_info* update;
+    int total, i, r;
+    lms_t *lms = data;
+    lms_plugin_t* plugin = _parsers_get_id3_plugin(lms);
+
+    update = (struct update_info*)lms->cache;
+    total = update->total;
+    i = update->threads[1].start;
+    while (i < total) {
+        r = plugin->parse2(plugin, NULL, i);
+        i++;  
+        update->threads[1].scanned++;
+    }
+    return lms;
+}
+
+static int 
+_get_memory_for_parse_extra(lms_t *lms) {
+    lms->cache = (char*)malloc(sizeof(char) * SHM_MAXSIZE);
+    //lms->cache = NULL;
+    return 0;
+}
+
+static int 
+_free_memory_for_parse_extra(lms_t *lms) {
+
+    if (lms->cache != NULL) {
+        free(lms->cache);
+    }
+    return 0;
+}
+
+static int update_batch(lms_plugin_t* plugin, unsigned int *start, unsigned int interval, unsigned int *committed , unsigned int end)
+{
+    while (*committed < interval && *start < end)
+    {
+        int r = plugin->update(plugin, NULL, *start);
+        if (r < 0)
+            break;
+        (*committed)++;
+        (*start)++;
+    }
+    return 0;
+}
+
+static int _update_extra(lms_t *lms, struct db *db, int run_thread2)
+{
+    struct update_info* update;
+    unsigned int total;
+    unsigned int committed, pos0, pos1, end0, end1;
+
+    lms_plugin_t* plugin = _parsers_get_id3_plugin(lms);
+    update = (struct update_info*)lms->cache;
+    total = 0;
+    committed = 0;
+
+    pos0 = 0;
+    if (run_thread2) {
+        pos1 = update->threads[1].start;
+        end0 = pos1;
+        end1 = update->total;
+    }
+    else
+        end0 = update->total; 
+
+    lms_db_begin_transaction(db->transaction_begin);
+
+    while (total  < update->total) {  
+         update_batch(plugin, &pos0, lms->commit_interval, &committed, end0);
+         if (run_thread2 && committed != lms->commit_interval)
+               update_batch(plugin, &pos1, lms->commit_interval, &committed, end1);
+
+         if (committed == lms->commit_interval || (total + committed) == update->total)
+         {
+            total += committed;
+            committed = 0;
+            lms_db_end_transaction(db->transaction_commit);
+            lms_db_begin_transaction(db->transaction_begin);
+         }
+         else
+             usleep(1000);
+    }
+    lms_db_end_transaction(db->transaction_commit);
+    return 0;
+}
+
+static int _parse_extra(GThread **thread, lms_t *lms, struct db *db, int last) {
+
+    GThread *thread1 = *thread;
+    GThread *thread2 = NULL;
+    struct update_info* update;
+    int total, index;
+    int run_thread2 = 0;
+    int seconds= time((time_t*)NULL); 
+
+    if(lms->cache == NULL)
+		return 0;
+
+    update = (struct update_info*)lms->cache;
+    update->finished = 1;
+    total = update->total;
+
+    if(total == 0)
+    {
+        _notify_start();
+        _enable_parse();
+        return 0;
+    }
+
+	fprintf(stderr, "This basic attrs scan ending: %d\n", seconds);
+
+    _enable_parse();
+    
+    index = _find_start(total, update->threads[0].scanned);
+    update->threads[1].start = index;
+    thread2 = g_thread_new("_parse_extra_thread2",  _parse_extra_thread2, lms);
+
+    _update_extra(lms, db, run_thread2);
+
+    g_thread_join(thread1);
+    g_thread_join(thread2);
+    g_thread_unref(thread1);
+    g_thread_unref(thread2);
+
+    if (last != 1)
+    	*thread = g_thread_new("parse_extra",  _parse_extra_thread, lms);
+
+    memset(lms->cache, 0, SHM_MAXSIZE);
+    return 0;
+}
+
+static int 
+_start_parsing(lms_t *lms, int consume, int threshold) {
+   
+    struct update_info* update = (struct update_info*)lms->cache;
+    if (update == NULL || update->total == 0)
+        return 0;
+
+    if (update->status == STATUS_IDLE) {
+        _notify_start();
+        update->status = STATUS_PARSING; 
+        return 0;
+    }
+    else if (update->status == STATUS_PARSING) {
+        if (consume < threshold)
+            _disable_parse();
+        else
+            _enable_parse();
+    }
+
+    return 0;
+}
+
 int
 lms_parsers_run(lms_t *lms, sqlite3 *db, void **parser_match, struct lms_file_info *finfo)
 {
@@ -480,6 +762,7 @@ _db_and_parsers_setup(lms_t *lms, struct db **db_ret, void ***parser_match_ret)
  *  LMS_PROGRESS_STATUS_UP_TO_DATE
  *  LMS_PROGRESS_STATUS_PROCESSED
  *  LMS_PROGRESS_STATUS_SKIPPED
+ *  LMS_PROGRESS_STATUS_PROCESSED_FULL
  *  < 0 on error
  */
 static int
@@ -489,10 +772,15 @@ _db_and_parsers_process_file(lms_t *lms, struct db *db, void **parser_match,
 {
     struct lms_file_info finfo;
     int used, r;
+    struct timeval t_start, t_end;
+    const int threshold = 1000;
+    int consume = 0;
 
     finfo.path = path;
     finfo.path_len = path_len;
     finfo.base = path_base;
+
+    gettimeofday(&t_start, NULL);
 
     r = _retrieve_file_status(db, &finfo);
     if (r == 0) {
@@ -507,6 +795,9 @@ _db_and_parsers_process_file(lms_t *lms, struct db *db, void **parser_match,
         fprintf(stderr, "ERROR: could not detect file status.\n");
         return r;
     }
+
+    gettimeofday(&t_end, NULL);
+    consume = (t_end.tv_sec - t_start.tv_sec) * 1000000 + t_end.tv_usec - t_start.tv_usec;
 
     used = lms_parsers_check_using(lms, parser_match, &finfo);
     if (!used)
@@ -532,6 +823,7 @@ _db_and_parsers_process_file(lms_t *lms, struct db *db, void **parser_match,
         return r;
     }
 
+    _start_parsing(lms, consume, threshold);
     return LMS_PROGRESS_STATUS_PROCESSED;
 }
 
@@ -545,6 +837,13 @@ _slave_work(struct pinfo *pinfo)
     void **parser_match;
     struct db *db;
     unsigned int total_committed, counter;
+    GThread *thread;
+    struct update_info* update;
+    int parse_extra;
+
+    r = _get_memory_for_parse_extra(lms);
+    if (r < 0)
+        fprintf(stderr, "memory apply failed, no optimize.");
 
     r = _db_and_parsers_setup(lms, &db, &parser_match);
     if (r < 0)
@@ -555,18 +854,29 @@ _slave_work(struct pinfo *pinfo)
         fprintf(stderr, "ERROR: could not get global update id.\n");
         goto done;
     }
+    if(lms->cache != NULL)
+    	thread = g_thread_new("_parse_extra_thread",  _parse_extra_thread, lms);
 
     pinfo->common.update_id = r + 1;
 
     counter = 0;
     total_committed = 0;
+    parse_extra = 0;
+    update = (struct update_info*)lms->cache;
+
     lms_db_begin_transaction(db->transaction_begin);
 
     while (((r = _slave_recv_path(fds, &len, &base, path)) == 0) && len > 0) {
         r = _db_and_parsers_process_file(
             lms, db, parser_match, path, len, base, pinfo->common.update_id);
+        if (r == LMS_PROGRESS_STATUS_PROCESSED && update != NULL && update->total == UPDATE_BATCH_SIZE)
+        {
 
-        _slave_send_reply(fds, r);
+            _slave_send_reply(fds, LMS_PROGRESS_STATUS_PROCESSED_FULL);
+            parse_extra = 1;
+        }
+        else
+        	_slave_send_reply(fds, r);
 
         if (r < 0 ||
             (r == LMS_PROGRESS_STATUS_UP_TO_DATE ||
@@ -574,7 +884,7 @@ _slave_work(struct pinfo *pinfo)
             continue;
 
         counter++;
-        if (counter > lms->commit_interval) {
+        if (counter > lms->commit_interval || parse_extra == 1) {
             if (!total_committed) {
                 total_committed += counter;
                 lms_db_update_id_set(db->handle, pinfo->common.update_id);
@@ -584,6 +894,15 @@ _slave_work(struct pinfo *pinfo)
             lms_db_begin_transaction(db->transaction_begin);
             counter = 0;
         }
+
+        if (parse_extra == 1) {
+            lms_db_end_transaction(db->transaction_commit);            
+            r = _slave_recv_path(fds, &len, &base, path);
+            r = _parse_extra(&thread, lms, db, 0);
+            parse_extra = 0;
+            _slave_send_reply(fds,r);
+            lms_db_begin_transaction(db->transaction_begin);
+        }
     }
 
     if (counter) {
@@ -592,11 +911,13 @@ _slave_work(struct pinfo *pinfo)
     }
 
     lms_db_end_transaction(db->transaction_commit);
-
+    if (lms->cache != NULL)
+    	_parse_extra(&thread, lms, db, 1);
 done:
     free(parser_match);
     lms_parsers_finish(lms, db->handle);
     _db_close(db);
+    _free_memory_for_parse_extra(lms);
 
     return r;
 }
@@ -701,6 +1022,153 @@ lms_create_slave(struct pinfo *pinfo, int (*work)(struct pinfo *pinfo))
     lms_free(pinfo->common.lms);
     _exit(r);
     return r; /* shouldn't reach anyway... */
+}
+
+static int
+_stat_file(int base, char *path, const char *name)
+{
+    int new_len;
+    struct stat st= {0};
+    new_len = _strcat(base, path, name);
+    if (new_len < 0)
+        return -1;
+    if (stat(path, &st) != 0) {
+        perror("stat");
+        return -2;
+    }
+    return 0;
+}
+
+static int _stat_dir(int base, char *path, const char *name);
+
+static int
+_stat_unknown(int base, char *path, const char *name)
+{
+    struct stat st;
+    int new_len;
+
+    new_len = _strcat(base, path, name);
+    if (new_len < 0)
+        return -1;
+
+    if (stat(path, &st) != 0) {
+        perror("stat");
+        return -2;
+    }
+
+    if (S_ISREG(st.st_mode)) {
+        return 0;
+    } else if (S_ISDIR(st.st_mode)) {
+        int r = _stat_dir(base, path, name);
+        if (r >= 0) /* ignore non-fatal errors */
+            return 0;
+        return r;
+    } else {
+        fprintf(stderr,
+                "INFO: %s is neither a directory nor a regular file.\n", path);
+        return -3;
+    }
+}
+
+static int
+_stat_dir(int base, char *path, const char *name) {
+
+    struct dirent *de;
+    int new_len, r;
+    DIR *dir;
+
+    new_len = _strcat(base, path, name);
+    if (new_len < 0)
+        return -1;
+    else if (new_len + 1 >= PATH_SIZE) {
+        fprintf(stderr, "ERROR: path too long\n");
+        return 2;
+    }
+
+    dir = opendir(path);
+    if (dir == NULL) {
+        perror("opendir");
+        return 3;
+    }
+
+    path[new_len] = '/';
+    new_len++;
+
+    r = 0;
+
+    while ((de = readdir(dir)) != NULL) {
+        if (de->d_name[0] == '.')
+            continue;
+        if (de->d_type == DT_REG) {
+            if (_stat_file(new_len, path, de->d_name) < 0) {
+                fprintf(stderr,
+                        "ERROR: unrecoverable error parsing file, "
+                        "exit \"%s\".\n", path);
+                path[new_len - 1] = '\0';
+                r = -4;
+                goto end;
+            }
+        } else if (de->d_type == DT_DIR) {
+            if (_stat_dir(new_len, path, de->d_name) < 0) {
+                fprintf(stderr,
+                        "ERROR: unrecoverable error parsing dir, "
+                        "exit \"%s\".\n", path);
+                path[new_len - 1] = '\0';
+                r = -5;
+                goto end;
+            }
+        } else if (de->d_type == DT_UNKNOWN) {
+            if (_stat_unknown(new_len, path, de->d_name) < 0) {
+                fprintf(stderr,
+                        "ERROR: unrecoverable error parsing DT_UNKNOWN, "
+                        "exit \"%s\".\n", path);
+                path[new_len - 1] = '\0';
+                r = -6;
+                goto end;
+            }
+        }
+    }
+
+end:
+    closedir(dir);
+    return r;
+}
+
+static int 
+lms_create_stat_slave(const char* top_path) 
+{
+    char path[PATH_SIZE] = {0};
+    char *bname;
+    int len, r;
+    int pid = fork();
+
+    if(pid == -1) {
+        return -1;
+    }    
+
+    if(pid > 0) //main process
+      return 0;
+    
+    nice(5);
+
+    if (realpath(top_path, path) == NULL) {
+        perror("realpath");
+        return -1;
+    }
+   
+    /* search '/' backwards, split dirname and basename, note realpath usage */
+    len = strlen(path);
+    for (; len >= 0 && path[len] != '/'; len--);
+    len++;
+    bname = strdup(path + len);
+    if (bname == NULL) {
+        perror("strdup");
+        return -2;
+    }
+
+    r = _stat_unknown(len, path, bname);
+    _exit(0);
+    return 0 ;
 }
 
 static int
@@ -814,6 +1282,40 @@ _report_progress(struct cinfo *info, const char *path, int path_len, lms_progres
     cb(lms, path, path_len, status, lms->progress.data);
 }
 
+static int 
+_process_update (struct cinfo *info, int base, char *path, int new_len)
+{
+    int r, reply;
+    struct pinfo *pinfo = (struct pinfo *)info;
+
+    if (_master_send_path(&pinfo->master, new_len, base, path) != 0)
+        return -2;
+    r = _master_recv_reply(&pinfo->master, &pinfo->poll, &reply,
+        pinfo->common.lms->slave_timeout2);
+
+    if (r < 0) {
+        _report_progress(info, path, new_len, LMS_PROGRESS_STATUS_ERROR_COMM);
+        return -3;
+    } else if (r == 1) {
+        fprintf(stderr, "ERROR: slave took too long, restart %d time %d\n",
+                pinfo->child,  pinfo->common.lms->slave_timeout2 );
+        _report_progress(info, path, new_len, LMS_PROGRESS_STATUS_KILLED);
+        if (lms_restart_slave(pinfo, _slave_work) != 0)
+            return -4;
+        return 1;
+    } else {
+        if (reply < 0) {
+            fprintf(stderr, "ERROR: pid=%d failed to parse \"%s\".\n",
+                    getpid(), path);
+            _report_progress(
+                info, path, new_len, LMS_PROGRESS_STATUS_ERROR_PARSE);
+            return reply;
+        }
+        return reply;
+    }
+
+}
+
 static int
 _process_file(struct cinfo *info, int base, char *path, const char *name)
 {
@@ -833,8 +1335,8 @@ _process_file(struct cinfo *info, int base, char *path, const char *name)
         _report_progress(info, path, new_len, LMS_PROGRESS_STATUS_ERROR_COMM);
         return -3;
     } else if (r == 1) {
-        fprintf(stderr, "ERROR: slave took too long, restart %d\n",
-                pinfo->child);
+        fprintf(stderr, "ERROR: slave took too long, restart %d time %d\n",
+                pinfo->child,  pinfo->common.lms->slave_timeout );
         _report_progress(info, path, new_len, LMS_PROGRESS_STATUS_KILLED);
         if (lms_restart_slave(pinfo, _slave_work) != 0)
             return -4;
@@ -848,6 +1350,10 @@ _process_file(struct cinfo *info, int base, char *path, const char *name)
             return reply;
         }
         _report_progress(info, path, new_len, reply);
+        if (reply == LMS_PROGRESS_STATUS_PROCESSED_FULL) {
+            r = _process_update(info, base, path, new_len);
+            return LMS_PROGRESS_STATUS_PROCESSED;
+        }
         return reply;
     }
 }
@@ -1075,6 +1581,8 @@ lms_process(lms_t *lms, const char *top_path)
         r = -1;
         goto end;
     }
+
+    lms_create_stat_slave(top_path);
 
     if (lms_create_slave(&pinfo, _slave_work) != 0) {
         r = -2;

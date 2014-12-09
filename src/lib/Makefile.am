@@ -1,7 +1,7 @@
 MAINTAINERCLEANFILES = Makefile.in
 
 AM_CPPFLAGS = -include $(top_builddir)/config.h \
-		-I$(top_srcdir)/src/lib @SQLITE3_CFLAGS@
+		-I$(top_srcdir)/src/lib @SQLITE3_CFLAGS@ @GIO_CFLAGS@
 AM_CFLAGS = $(WARNINGFLAGS)
 AM_LDFLAGS = $(GCLDFLAGS)
 
@@ -29,5 +29,5 @@ liblightmediascanner_la_SOURCES = \
 	lightmediascanner_dlna_rules.c \
 	lightmediascanner_dlna.c
 
-liblightmediascanner_la_LIBADD = -ldl @SQLITE3_LIBS@ @LTLIBICONV@
+liblightmediascanner_la_LIBADD = -ldl @SQLITE3_LIBS@ @LTLIBICONV@ @GIO_LIBS@
 liblightmediascanner_la_LDFLAGS = -version-info @version_info@
