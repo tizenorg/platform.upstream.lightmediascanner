@@ -31,7 +31,8 @@ lightmediascannerd_CPPFLAGS = $(AM_CPPFLAGS) @GIO_CFLAGS@
 lightmediascannerd_LDADD = \
 	$(top_builddir)/src/lib/liblightmediascanner.la \
 	@SQLITE3_LIBS@ \
-	@GIO_LIBS@
+	@GIO_LIBS@ \
+	@COMMON_LIB_PKGS_LIBS@
 lightmediascannerd_DEPENDENCIES = \
 	$(top_builddir)/src/lib/liblightmediascanner.la
 

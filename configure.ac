@@ -39,6 +39,7 @@ AM_ICONV
 
 # required modules
 PKG_CHECK_MODULES(SQLITE3, [sqlite3 >= 3.3])
+PKG_CHECK_MODULES(COMMON_LIB_PKGS,[libtzplatform-config])
 
 # plugins checks
 

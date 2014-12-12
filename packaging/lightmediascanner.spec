@@ -15,8 +15,10 @@ BuildRequires: pkgconfig(libavformat)
 BuildRequires: pkgconfig(glib-2.0)
 BuildRequires: pkgconfig(flac)
 BuildRequires: pkgconfig(vorbis)
+BuildRequires: pkgconfig(libtzplatform-config)
 Requires: libmp4v2
 Requires: libtheora
+Requires: libtzplatform-config
 
 %define testbindir %{_builddir}/%{name}-%{version}
 

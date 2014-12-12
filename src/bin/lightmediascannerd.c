@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <sqlite3.h>
+#include <tzplatform_config.h>
 
 static char *db_path = NULL;
 static char **charsets = NULL;
@@ -1472,12 +1473,12 @@ _populate_dir_internal(const char *category, const char *dir)
             const char *cat;
             const char *path;
         } *itr, defaults[] = {
-            {"audio", g_get_user_special_dir(G_USER_DIRECTORY_MUSIC)},
-            {"video", g_get_user_special_dir(G_USER_DIRECTORY_VIDEOS)},
-            {"picture", g_get_user_special_dir(G_USER_DIRECTORY_PICTURES)},
-            {"multimedia", g_get_user_special_dir(G_USER_DIRECTORY_MUSIC)},
-            {"multimedia", g_get_user_special_dir(G_USER_DIRECTORY_VIDEOS)},
-            {"multimedia", g_get_user_special_dir(G_USER_DIRECTORY_PICTURES)},
+            {"audio", tzplatform_getenv(TZ_USER_SOUNDS)},
+            {"video", tzplatform_getenv(TZ_USER_VIDEOS)},
+            {"picture", tzplatform_getenv(TZ_USER_IMAGES)},
+            {"multimedia", tzplatform_getenv(TZ_USER_SOUNDS)},
+            {"multimedia", tzplatform_getenv(TZ_USER_VIDEOS)},
+            {"multimedia", tzplatform_getenv(TZ_USER_IMAGES)},
             {NULL, NULL}
         };
         for (itr = defaults; itr->cat != NULL; itr++) {
