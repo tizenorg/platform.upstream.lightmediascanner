@@ -1,3 +1,8 @@
+* Thu Jan 08 2015 Leandro Dorileo <leandro.maciel.dorileo@intel.com>
+- upstream based
+- changed packaging to update .service file to inform media directory
+  and to full scan on startup.
+
 * Thu Feb 13 2014 Leandro Dorileo <leandro.maciel.dorileo@intel.com>
 - upstream based
 
