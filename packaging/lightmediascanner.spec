@@ -19,6 +19,9 @@ Requires: libmp4v2
 Requires: libtheora
 
 %define testbindir %{_builddir}/%{name}-%{version}
+%define mediadir   "multimedia:/home/app/dlna_files"
+%define dbusdir    share/dbus-1/services/
+%define dbusfile   %{dbusdir}/org.lightmediascanner.service
 
 %description
 Description: %{summary}
@@ -58,6 +61,10 @@ libtool --mode=install install -m 0755 %{testbindir}/src/bin/list-parsers %{buil
 %post
 /sbin/ldconfig
 
+if [ `grep %{mediadir} %{_prefix}/%{dbusfile} | wc -l` = 0 ]; then
+    sed -i "s,scannerd,scannerd -D %{mediadir} -S,g" %{_prefix}/%{dbusfile}
+fi
+
 %postun
 /sbin/ldconfig
 
@@ -67,7 +74,7 @@ libtool --mode=install install -m 0755 %{testbindir}/src/bin/list-parsers %{buil
 %license COPYING
 %{_libdir}/*.so.*
 %{_libdir}/lightmediascanner/plugins/*
-%{_prefix}/share/dbus-1/services/*.service
+%{_prefix}/%{dbusdir}/*.service
 
 %files devel
 %defattr(-, root, root)
