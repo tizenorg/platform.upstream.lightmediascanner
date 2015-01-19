@@ -1,11 +1,13 @@
 Name:       lightmediascanner
 Summary:    Light media scanner is a media indexer for embedded devices
-Version:    0.4.5
-Release:    2
+Version:    0.5.0
+Release:    1
 Group:      Multimedia/Libraries
 License:    LGPL-2.1
 Source:	    %{name}-%{version}.tar.gz
 Url:	    https://github.com/profusion/lightmediascanner
+BuildRequires: file-devel
+BuildRequires: libmagic
 BuildRequires: sqlite-devel
 BuildRequires: gettext-tools
 BuildRequires: libmp4v2-devel
@@ -17,6 +19,7 @@ BuildRequires: pkgconfig(flac)
 BuildRequires: pkgconfig(vorbis)
 Requires: libmp4v2
 Requires: libtheora
+Requires: libmagic
 
 %define testbindir %{_builddir}/%{name}-%{version}
 %define mediadir   "multimedia:/home/app/dlna_files"

@@ -1,3 +1,6 @@
+* Thu Jan 20 2015 Leandro Dorileo <leandro.maciel.dorileo@intel.com>
+- upstream rebase
+- version dump (to 0.5.0)
 * Thu Jan 08 2015 Leandro Dorileo <leandro.maciel.dorileo@intel.com>
 - upstream based
 - changed packaging to update .service file to inform media directory
